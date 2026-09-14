@@ -150,6 +150,44 @@ def list_journal_entries_created_by_user(
 
 
 @mcp.tool()
+def odoo_fields(model: str) -> dict:
+    """
+    List field names/types for any Odoo model (e.g. 'pos.config', 'pos.order',
+    'res.company', 'account.analytic.account'). Use this to discover the
+    right field name before calling odoo_read — e.g. to find how "branch"
+    or "location" is represented for a given model.
+    """
+    return odoo.fields_get(model)
+
+
+@mcp.tool()
+def odoo_read(
+    model: str,
+    domain: list = None,
+    fields: list = None,
+    group_by: list = None,
+    limit: int = 200,
+    order: str = "",
+) -> list:
+    """
+    Generic READ-ONLY query against any Odoo model. Read-only: this can
+    never create, write, or delete anything — it only ever calls Odoo's
+    search_read (or read_group when group_by is given).
+
+    model: e.g. 'pos.order', 'pos.config', 'account.move.line'
+    domain: Odoo domain list, e.g. [["date_order", ">=", "2026-04-01"]]
+    fields: list of field names to return
+    group_by: if given, aggregates with read_group instead of listing records
+              (fields should include the ones you want summed, e.g. ["amount_total"])
+    """
+    domain = domain or []
+    fields = fields or []
+    if group_by:
+        return odoo.read_group(model, domain, fields, group_by, limit=limit)
+    return odoo.search_read(model, domain, fields, limit=limit, order=order)
+
+
+@mcp.tool()
 def list_bank_journals() -> list:
     """List bank/cash journals available to pay from (needed for creating a draft payment)."""
     return odoo.search_read(

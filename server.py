@@ -116,6 +116,40 @@ def list_open_vendor_bills(vendor_id: int = 0) -> list:
 
 
 @mcp.tool()
+def list_journal_entries_created_by_user(
+    user_search: str,
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 300,
+) -> list:
+    """
+    List journal entries (bills, customer invoices, payments, manual entries —
+    any account.move record) created by a specific Odoo user, newest first.
+
+    user_search: partial match on the user's name or login, e.g. 'Ali' or
+                 'a.algahtani@cafcafe.com'. Case-insensitive partial match.
+    date_from / date_to: optional 'YYYY-MM-DD' bounds on the entry's date.
+    """
+    domain = [
+        "|",
+        ("create_uid.name", "ilike", user_search),
+        ("create_uid.login", "ilike", user_search),
+    ]
+    if date_from:
+        domain.append(("date", ">=", date_from))
+    if date_to:
+        domain.append(("date", "<=", date_to))
+    return odoo.search_read(
+        "account.move",
+        domain,
+        ["id", "name", "move_type", "date", "partner_id", "amount_total",
+         "state", "ref", "create_date"],
+        limit=limit,
+        order="date desc, id desc",
+    )
+
+
+@mcp.tool()
 def list_bank_journals() -> list:
     """List bank/cash journals available to pay from (needed for creating a draft payment)."""
     return odoo.search_read(

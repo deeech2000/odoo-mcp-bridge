@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: odoo-mcp-bridge
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python server.py"
+    envVars:
+      - key: ODOO_URL
+        sync: false
+      - key: ODOO_DB
+        sync: false
+      - key: ODOO_USERNAME
+        sync: false
+      - key: ODOO_API_KEY
+        sync: false
+      - key: MCP_SHARED_SECRET
+        sync: false

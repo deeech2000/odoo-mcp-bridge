@@ -18,9 +18,21 @@ from starlette.responses import PlainTextResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from odoo_client import OdooClient
 
-mcp = FastMCP("odoo-accounting-bridge")
+# Render's public hostname. FastMCP's default DNS-rebinding protection only
+# allows "localhost" as a Host header, which rejects every real request that
+# comes in through Render's proxy under its own hostname. We explicitly
+# allow that hostname instead of turning the protection off entirely.
+_public_host = os.environ.get("PUBLIC_HOSTNAME", "odoo-mcp-bridge.onrender.com")
+_transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[_public_host, "127.0.0.1:*", "localhost:*"],
+    allowed_origins=[f"https://{_public_host}"],
+)
+
+mcp = FastMCP("odoo-accounting-bridge", transport_security=_transport_security)
 odoo = OdooClient()
 
 SHARED_SECRET = os.environ.get("MCP_SHARED_SECRET")

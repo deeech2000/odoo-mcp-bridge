@@ -56,6 +56,16 @@ class OdooClient:
             kwargs["order"] = order
         return self.execute_kw(model, "search_read", [domain], kwargs)
 
+    def read_group(self, model: str, domain: list, fields: list, groupby: list, limit: int = 200) -> list:
+        return self.execute_kw(
+            model, "read_group", [domain, fields, groupby], {"lazy": False, "limit": limit}
+        )
+
+    def fields_get(self, model: str) -> dict:
+        return self.execute_kw(
+            model, "fields_get", [], {"attributes": ["string", "type", "relation"]}
+        )
+
     # ---- write helpers (DRAFT ONLY — see module docstring) -----------
 
     def create(self, model: str, values: dict) -> int:

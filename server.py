@@ -5,7 +5,9 @@ Exposes a small set of read tools (vendor list, vendor statement/ledger,
 open bills, bank journals) and DRAFT-ONLY write tools (create a vendor bill,
 create a vendor payment). Nothing this server does can post, confirm, or
 pay anything inside Odoo — every created record is left in Odoo's normal
-'draft' state for a human to review and confirm inside Odoo itself.
+'draft' state for a human to review and confirm inside Odoo itself. The one
+exception is reconcile_move_lines, which only matches already-posted lines
+against each other and moves no money.
 
 Auth: every request must include header  X-API-Key: <MCP_SHARED_SECRET>
 This is separate from the Odoo API key — it's a secret you invent yourself
@@ -21,10 +23,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from odoo_client import OdooClient
 
-# Render's public hostname. FastMCP's default DNS-rebinding protection only
-# allows "localhost" as a Host header, which rejects every real request that
-# comes in through Render's proxy under its own hostname. We explicitly
-# allow that hostname instead of turning the protection off entirely.
 _public_host = os.environ.get("PUBLIC_HOSTNAME", "odoo-mcp-bridge.onrender.com")
 _transport_security = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
@@ -38,10 +36,6 @@ odoo = OdooClient()
 SHARED_SECRET = os.environ.get("MCP_SHARED_SECRET")
 
 
-# ------------------------------------------------------------------
-# Simple shared-secret check on every HTTP request (defense in depth,
-# on top of whatever auth Claude's connector config adds).
-# ------------------------------------------------------------------
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request: Request):
     return PlainTextResponse("ok")
@@ -185,6 +179,27 @@ def odoo_read(
     if group_by:
         return odoo.read_group(model, domain, fields, group_by, limit=limit)
     return odoo.search_read(model, domain, fields, limit=limit, order=order)
+
+
+@mcp.tool()
+def reconcile_move_lines(line_ids: list) -> dict:
+    """
+    Reconcile (match) a set of already-POSTED account.move.line ids against
+    each other — e.g. matching a vendor payment line against the specific
+    bill lines it settles. This does NOT move any money and does NOT create
+    or post anything; the payment/bills must already be posted in Odoo. It
+    only updates their "reconciled/matched" bookkeeping status.
+
+    IMPORTANT: this only works cleanly if the given lines' debits and
+    credits net to zero (a full reconciliation) or are meant as a partial
+    match. Always verify the amounts add up before calling this — get the
+    line ids and balances from get_vendor_statement first.
+
+    line_ids: list of account.move.line ids (the "id" field returned by
+              get_vendor_statement's "lines") to reconcile together.
+    """
+    result = odoo.reconcile(line_ids)
+    return {"line_ids": line_ids, "result": result, "note": "Reconciliation attempted on posted lines."}
 
 
 @mcp.tool()

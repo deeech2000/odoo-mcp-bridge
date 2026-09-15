@@ -8,6 +8,9 @@ Safety principle used throughout this whole project:
     record out of the 'draft' state.
   - This means everything this server creates lands in Odoo as a draft that
     a human still has to open and confirm/post inside Odoo itself.
+  - The one exception is `reconcile()`, used only on already-posted lines
+    to match existing debits/credits — it moves no money, it only updates
+    matching status.
 """
 
 import os
@@ -47,6 +50,10 @@ class OdooClient:
         return self._models.execute_kw(
             self.db, self.uid, self.api_key, model, method, args, kwargs or {}
         )
+
+    def reconcile(self, line_ids: list) -> Any:
+        """Reconcile a set of account.move.line ids against each other (full or partial)."""
+        return self.execute_kw("account.move.line", "reconcile", [line_ids])
 
     # ---- generic read helpers ----------------------------------------
 

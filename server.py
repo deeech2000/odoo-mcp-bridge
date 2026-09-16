@@ -3,11 +3,11 @@ Odoo <-> Claude MCP bridge.
 
 Exposes a small set of read tools (vendor list, vendor statement/ledger,
 open bills, bank journals) and DRAFT-ONLY write tools (create a vendor bill,
-create a vendor payment). Nothing this server does can post, confirm, or
-pay anything inside Odoo — every created record is left in Odoo's normal
-'draft' state for a human to review and confirm inside Odoo itself. The one
-exception is reconcile_move_lines, which only matches already-posted lines
-against each other and moves no money.
+create a vendor payment, and edit-while-still-draft). Nothing this server
+does can post, confirm, or pay anything inside Odoo — every created record
+is left in Odoo's normal 'draft' state for a human to review and confirm
+inside Odoo itself. The one exception is reconcile_move_lines, which only
+matches already-posted lines against each other and moves no money.
 
 Auth: every request must include header  X-API-Key: <MCP_SHARED_SECRET>
 This is separate from the Odoo API key — it's a secret you invent yourself
@@ -200,6 +200,65 @@ def reconcile_move_lines(line_ids: list) -> dict:
     """
     result = odoo.reconcile(line_ids)
     return {"line_ids": line_ids, "result": result, "note": "Reconciliation attempted on posted lines."}
+
+
+@mcp.tool()
+def list_draft_payments(journal_id: int = 0, date_from: str = "", date_to: str = "", limit: int = 100) -> list:
+    """
+    List DRAFT (not yet posted) vendor/customer payments. Useful for finding
+    payments you've reset to draft that still need their journal (bank
+    account), date, or memo corrected before re-posting.
+
+    journal_id: pass a journal id (see list_bank_journals()) to filter to
+                payments currently sitting in that bank/cash account. 0 = all.
+    date_from / date_to: optional 'YYYY-MM-DD' bounds.
+    """
+    domain = [("state", "=", "draft")]
+    if journal_id:
+        domain.append(("journal_id", "=", journal_id))
+    if date_from:
+        domain.append(("date", ">=", date_from))
+    if date_to:
+        domain.append(("date", "<=", date_to))
+    return odoo.search_read(
+        "account.payment",
+        domain,
+        ["id", "name", "partner_id", "amount", "journal_id", "date", "memo", "payment_type"],
+        limit=limit,
+        order="date asc",
+    )
+
+
+@mcp.tool()
+def update_draft_payment(
+    payment_id: int,
+    journal_id: int = 0,
+    date: str = "",
+    memo: str = "",
+) -> dict:
+    """
+    Edit a payment's journal (bank account), date, and/or memo — but ONLY
+    while it is still in 'draft' state. Refuses with an error if the
+    payment is posted/confirmed, so this can never silently alter a
+    payment that has already gone through Odoo's approval flow. Does NOT
+    post/confirm the payment — it stays draft for a human to review and
+    post themselves in Odoo.
+
+    Only pass the fields you actually want to change; leave others at
+    their default (0 / "") to leave them untouched.
+    """
+    values = {}
+    if journal_id:
+        values["journal_id"] = journal_id
+    if date:
+        values["date"] = date
+    if memo:
+        values["memo"] = memo
+    if not values:
+        return {"payment_id": payment_id, "note": "Nothing to update — no fields provided."}
+    odoo.write_draft_only("account.payment", payment_id, values)
+    return {"payment_id": payment_id, "updated_fields": values, "state": "draft",
+            "note": "Updated while draft. Not posted — review and post in Odoo yourself."}
 
 
 @mcp.tool()

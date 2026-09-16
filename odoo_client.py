@@ -11,6 +11,8 @@ Safety principle used throughout this whole project:
   - The one exception is `reconcile()`, used only on already-posted lines
     to match existing debits/credits — it moves no money, it only updates
     matching status.
+  - `write_draft_only()` lets us edit a record's fields, but only after
+    checking its state is still 'draft' — it refuses otherwise.
 """
 
 import os
@@ -78,3 +80,19 @@ class OdooClient:
     def create(self, model: str, values: dict) -> int:
         """Create a record. Never followed by a call that posts/confirms it."""
         return self.execute_kw(model, "create", [values])
+
+    def write_draft_only(self, model: str, record_id: int, values: dict) -> bool:
+        """
+        Write to a record ONLY if its current state is 'draft'. Refuses
+        (raises) otherwise, so this can never be used to silently edit a
+        posted/confirmed record.
+        """
+        current = self.search_read(model, [("id", "=", record_id)], ["state"], limit=1)
+        if not current:
+            raise ValueError(f"{model} id {record_id} not found.")
+        if current[0].get("state") != "draft":
+            raise ValueError(
+                f"{model} id {record_id} is in state '{current[0].get('state')}', "
+                "not 'draft' — refusing to modify. Only draft records can be edited this way."
+            )
+        return self.execute_kw(model, "write", [[record_id], values])

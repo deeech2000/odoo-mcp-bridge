@@ -339,7 +339,7 @@ def list_expense_accounts(search: str = "") -> list:
 
 
 @mcp.tool()
-def create_draft_vendor_bill(
+def create_draft_vendor_bill_v2(
     vendor_id: int,
     invoice_date: str,
     description: str,

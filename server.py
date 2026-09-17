@@ -2,12 +2,13 @@
 Odoo <-> Claude MCP bridge.
 
 Exposes a small set of read tools (vendor list, vendor statement/ledger,
-open bills, bank journals) and DRAFT-ONLY write tools (create a vendor bill,
-create a vendor payment, and edit-while-still-draft). Nothing this server
-does can post, confirm, or pay anything inside Odoo — every created record
-is left in Odoo's normal 'draft' state for a human to review and confirm
-inside Odoo itself. The one exception is reconcile_move_lines, which only
-matches already-posted lines against each other and moves no money.
+open bills, bank journals, branches) and DRAFT-ONLY write tools (create a
+vendor bill — optionally tagged to a branch, create a vendor payment, and
+edit-while-still-draft). Nothing this server does can post, confirm, or pay
+anything inside Odoo — every created record is left in Odoo's normal
+'draft' state for a human to review and confirm inside Odoo itself. The one
+exception is reconcile_move_lines, which only matches already-posted lines
+against each other and moves no money.
 
 Auth: every request must include header  X-API-Key: <MCP_SHARED_SECRET>
 This is separate from the Odoo API key — it's a secret you invent yourself
@@ -277,12 +278,38 @@ def list_bank_journals() -> list:
 # ------------------------------------------------------------------
 
 @mcp.tool()
+def list_branches(search: str = "") -> list:
+    """
+    List the company's branches/locations (Odoo analytic accounts used as
+    "Branch" on pos.config). Returns each branch's analytic account id and
+    name — use that id as branch_analytic_account_id in
+    create_draft_vendor_bill to tag a bill's expense line to a specific
+    branch/location.
+
+    search: optional partial match on the branch name.
+    """
+    domain = []
+    if search:
+        domain.append(("name", "ilike", search))
+    configs = odoo.search_read(
+        "pos.config", domain, ["id", "name", "analytic_account_id"], limit=200, order="name"
+    )
+    seen = {}
+    for c in configs:
+        acc = c.get("analytic_account_id")
+        if acc:
+            seen[acc[0]] = acc[1]
+    return [{"analytic_account_id": k, "branch_name": v} for k, v in sorted(seen.items(), key=lambda x: x[1])]
+
+
+@mcp.tool()
 def create_draft_vendor_bill(
     vendor_id: int,
     invoice_date: str,
     description: str,
     amount: float,
     ref: str = "",
+    branch_analytic_account_id: int = 0,
 ) -> dict:
     """
     Create a DRAFT vendor bill (e.g. for a monthly rent charge) in Odoo.
@@ -291,7 +318,15 @@ def create_draft_vendor_bill(
 
     invoice_date: 'YYYY-MM-DD'
     amount: total amount of the single invoice line (before tax)
+    branch_analytic_account_id: optional — tags the expense line to a
+        specific branch/location's analytic account (100% of the line),
+        so it shows up correctly in branch-level reports. Get the right id
+        from list_branches(). Leave as 0 to create the line with no
+        analytic/branch tag (e.g. for head-office costs).
     """
+    line_values = {"name": description, "quantity": 1, "price_unit": amount}
+    if branch_analytic_account_id:
+        line_values["analytic_distribution"] = {str(branch_analytic_account_id): 100.0}
     move_id = odoo.create(
         "account.move",
         {
@@ -299,9 +334,7 @@ def create_draft_vendor_bill(
             "partner_id": vendor_id,
             "invoice_date": invoice_date,
             "ref": ref,
-            "invoice_line_ids": [
-                (0, 0, {"name": description, "quantity": 1, "price_unit": amount})
-            ],
+            "invoice_line_ids": [(0, 0, line_values)],
         },
     )
     return {"created_move_id": move_id, "state": "draft", "note": "Not posted. Review in Odoo."}

@@ -2,13 +2,14 @@
 Odoo <-> Claude MCP bridge.
 
 Exposes a small set of read tools (vendor list, vendor statement/ledger,
-open bills, bank journals, branches) and DRAFT-ONLY write tools (create a
-vendor bill — optionally tagged to a branch, create a vendor payment, and
-edit-while-still-draft). Nothing this server does can post, confirm, or pay
-anything inside Odoo — every created record is left in Odoo's normal
-'draft' state for a human to review and confirm inside Odoo itself. The one
-exception is reconcile_move_lines, which only matches already-posted lines
-against each other and moves no money.
+open bills, bank journals, branches, departments, expense accounts) and
+DRAFT-ONLY write tools (create a vendor bill — optionally tagged to a
+branch/department/GL account, create a vendor payment, and edit-while-
+still-draft). Nothing this server does can post, confirm, or pay anything
+inside Odoo — every created record is left in Odoo's normal 'draft' state
+for a human to review and confirm inside Odoo itself. The one exception is
+reconcile_move_lines, which only matches already-posted lines against each
+other and moves no money.
 
 Auth: every request must include header  X-API-Key: <MCP_SHARED_SECRET>
 This is separate from the Odoo API key — it's a secret you invent yourself
@@ -303,13 +304,50 @@ def list_branches(search: str = "") -> list:
 
 
 @mcp.tool()
+def list_departments(search: str = "") -> list:
+    """
+    List the company's departments (Odoo analytic accounts on the
+    "Department" analytic plan — e.g. "Top management", "Operation",
+    "Finance"). Use the returned id as department_analytic_account_id in
+    create_draft_vendor_bill for HO/department-level costs (as opposed to
+    a specific branch).
+
+    search: optional partial match on the department name.
+    """
+    domain = [("plan_id.name", "=", "Department")]
+    if search:
+        domain.append(("name", "ilike", search))
+    return odoo.search_read(
+        "account.analytic.account", domain, ["id", "name"], limit=100, order="name"
+    )
+
+
+@mcp.tool()
+def list_expense_accounts(search: str = "") -> list:
+    """
+    List expense-type GL accounts (account.account), so you can pick the
+    right account_id for create_draft_vendor_bill — e.g. "Outlets Rental"
+    (51030101) for branch rent vs "Rentals - head office" (51030103) for
+    HO rent. Search by name or code.
+    """
+    domain = [("account_type", "in", ["expense", "expense_direct_cost"])]
+    if search:
+        domain.append(("name", "ilike", search))
+    return odoo.search_read(
+        "account.account", domain, ["id", "code", "name", "account_type"], limit=100, order="code"
+    )
+
+
+@mcp.tool()
 def create_draft_vendor_bill(
     vendor_id: int,
     invoice_date: str,
     description: str,
     amount: float,
     ref: str = "",
+    account_id: int = 0,
     branch_analytic_account_id: int = 0,
+    department_analytic_account_id: int = 0,
 ) -> dict:
     """
     Create a DRAFT vendor bill (e.g. for a monthly rent charge) in Odoo.
@@ -318,15 +356,28 @@ def create_draft_vendor_bill(
 
     invoice_date: 'YYYY-MM-DD'
     amount: total amount of the single invoice line (before tax)
-    branch_analytic_account_id: optional — tags the expense line to a
-        specific branch/location's analytic account (100% of the line),
-        so it shows up correctly in branch-level reports. Get the right id
-        from list_branches(). Leave as 0 to create the line with no
-        analytic/branch tag (e.g. for head-office costs).
+    account_id: optional — the GL expense account for this line (see
+        list_expense_accounts()). Leave as 0 to let Odoo use the vendor's
+        default expense account.
+    branch_analytic_account_id: optional — tags the line to a specific
+        branch/location (see list_branches()). Leave as 0 for no branch tag
+        (e.g. head-office costs).
+    department_analytic_account_id: optional — tags the line to a
+        department (see list_departments()), e.g. "Top management" for HO
+        costs. Can be combined with branch_analytic_account_id on the same
+        line (Odoo supports multiple analytic dimensions at once) or used
+        alone without a branch.
     """
     line_values = {"name": description, "quantity": 1, "price_unit": amount}
+    if account_id:
+        line_values["account_id"] = account_id
+    analytic_distribution = {}
     if branch_analytic_account_id:
-        line_values["analytic_distribution"] = {str(branch_analytic_account_id): 100.0}
+        analytic_distribution[str(branch_analytic_account_id)] = 100.0
+    if department_analytic_account_id:
+        analytic_distribution[str(department_analytic_account_id)] = 100.0
+    if analytic_distribution:
+        line_values["analytic_distribution"] = analytic_distribution
     move_id = odoo.create(
         "account.move",
         {

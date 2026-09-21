@@ -2,14 +2,10 @@
 Odoo <-> Claude MCP bridge.
 
 Exposes a small set of read tools (vendor list, vendor statement/ledger,
-open bills, bank journals, branches, departments, expense accounts) and
-DRAFT-ONLY write tools (create a vendor bill — optionally tagged to a
-branch/department/GL account, create a vendor payment, and edit-while-
-still-draft). Nothing this server does can post, confirm, or pay anything
-inside Odoo — every created record is left in Odoo's normal 'draft' state
-for a human to review and confirm inside Odoo itself. The one exception is
-reconcile_move_lines, which only matches already-posted lines against each
-other and moves no money.
+open bills, bank journals) and DRAFT-ONLY write tools (create a vendor bill,
+create a vendor payment). Nothing this server does can post, confirm, or
+pay anything inside Odoo — every created record is left in Odoo's normal
+'draft' state for a human to review and confirm inside Odoo itself.
 
 Auth: every request must include header  X-API-Key: <MCP_SHARED_SECRET>
 This is separate from the Odoo API key — it's a secret you invent yourself
@@ -336,6 +332,91 @@ def list_expense_accounts(search: str = "") -> list:
     return odoo.search_read(
         "account.account", domain, ["id", "code", "name", "account_type"], limit=100, order="code"
     )
+
+
+@mcp.tool()
+def list_customers(search: str = "") -> list:
+    """List customers in Odoo (e.g. franchisees billed for royalties). Optionally filter by name."""
+    domain = [("customer_rank", ">", 0)]
+    if search:
+        domain.append(("name", "ilike", search))
+    return odoo.search_read(
+        "res.partner", domain, ["id", "name", "email", "phone"], limit=100, order="name"
+    )
+
+
+@mcp.tool()
+def get_customer_statement(customer_id: int, limit: int = 100) -> dict:
+    """
+    Get a customer's account ledger (statement of account) from Odoo:
+    every journal line posted to their receivable account, oldest first,
+    with a running balance. Positive balance = the customer owes us.
+    """
+    lines = odoo.search_read(
+        "account.move.line",
+        [
+            ("partner_id", "=", customer_id),
+            ("account_id.account_type", "=", "asset_receivable"),
+            ("parent_state", "=", "posted"),
+        ],
+        ["date", "move_name", "ref", "debit", "credit", "balance", "reconciled"],
+        limit=limit,
+        order="date asc, id asc",
+    )
+    running = 0.0
+    for line in lines:
+        running += line["debit"] - line["credit"]
+        line["running_balance"] = round(running, 2)
+    return {"customer_id": customer_id, "lines": lines, "ending_balance": round(running, 2)}
+
+
+@mcp.tool()
+def create_draft_customer_invoice(
+    customer_id: int,
+    invoice_date: str,
+    description: str,
+    amount: float,
+    ref: str = "",
+    account_id: int = 0,
+    branch_analytic_account_id: int = 0,
+    department_analytic_account_id: int = 0,
+) -> dict:
+    """
+    Create a DRAFT customer invoice (e.g. franchise royalty billed to a
+    franchisee/customer) in Odoo. It is created in 'draft' state only —
+    it is NOT posted/validated. A human must open it in Odoo and confirm
+    it.
+
+    invoice_date: 'YYYY-MM-DD'
+    amount: total amount of the single invoice line (before tax)
+    account_id: optional — the GL revenue account for this line (e.g. a
+        royalty income account). Leave as 0 to let Odoo use the default.
+    branch_analytic_account_id / department_analytic_account_id: optional
+        analytic tags (see list_branches() / list_departments()) — for
+        franchise royalties this is often a department like "Franchise"
+        rather than a branch.
+    """
+    line_values = {"name": description, "quantity": 1, "price_unit": amount}
+    if account_id:
+        line_values["account_id"] = account_id
+    analytic_distribution = {}
+    if branch_analytic_account_id:
+        analytic_distribution[str(branch_analytic_account_id)] = 100.0
+    if department_analytic_account_id:
+        analytic_distribution[str(department_analytic_account_id)] = 100.0
+    if analytic_distribution:
+        line_values["analytic_distribution"] = analytic_distribution
+    move_id = odoo.create(
+        "account.move",
+        {
+            "move_type": "out_invoice",
+            "partner_id": customer_id,
+            "invoice_date": invoice_date,
+            "ref": ref,
+            "invoice_line_ids": [(0, 0, line_values)],
+        },
+    )
+    return {"created_move_id": move_id, "state": "draft", "note": "Not posted. Review in Odoo."}
 
 
 @mcp.tool()

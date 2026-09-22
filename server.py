@@ -420,6 +420,104 @@ def create_draft_customer_invoice(
 
 
 @mcp.tool()
+def create_draft_customer_invoice_multiline(
+    customer_id: int,
+    invoice_date: str,
+    ref: str,
+    lines: list,
+) -> dict:
+    """
+    Create a DRAFT customer invoice with MULTIPLE lines in one go — e.g. one
+    franchise royalty invoice with a separate line per branch/outlet, all on
+    the same invoice. Draft only — NOT posted/validated; a human confirms it
+    in Odoo.
+
+    invoice_date: 'YYYY-MM-DD', applies to the whole invoice.
+    ref: reference for the whole invoice (e.g. "Egypt Royalty - Sep 2026").
+    lines: list of dicts, one per line, each with:
+        - description (str, required)
+        - amount (number, required) — this line's price_unit (qty is always 1)
+        - account_id (int, optional) — GL revenue account for this line
+        - branch_analytic_account_id (int, optional)
+        - department_analytic_account_id (int, optional)
+      e.g. [{"description": "CAF Cafe SA", "amount": 5960.35,
+             "branch_analytic_account_id": 158}, ...]
+    """
+    invoice_line_ids = []
+    for line in lines:
+        line_values = {"name": line["description"], "quantity": 1, "price_unit": line["amount"]}
+        if line.get("account_id"):
+            line_values["account_id"] = line["account_id"]
+        analytic_distribution = {}
+        if line.get("branch_analytic_account_id"):
+            analytic_distribution[str(line["branch_analytic_account_id"])] = 100.0
+        if line.get("department_analytic_account_id"):
+            analytic_distribution[str(line["department_analytic_account_id"])] = 100.0
+        if analytic_distribution:
+            line_values["analytic_distribution"] = analytic_distribution
+        invoice_line_ids.append((0, 0, line_values))
+
+    move_id = odoo.create(
+        "account.move",
+        {
+            "move_type": "out_invoice",
+            "partner_id": customer_id,
+            "invoice_date": invoice_date,
+            "ref": ref,
+            "invoice_line_ids": invoice_line_ids,
+        },
+    )
+    return {"created_move_id": move_id, "state": "draft", "line_count": len(lines),
+            "note": "Not posted. Review in Odoo."}
+
+
+@mcp.tool()
+def create_draft_customer_credit_note(
+    customer_id: int,
+    invoice_date: str,
+    description: str,
+    amount: float,
+    ref: str = "",
+    account_id: int = 0,
+    branch_analytic_account_id: int = 0,
+    department_analytic_account_id: int = 0,
+) -> dict:
+    """
+    Create a DRAFT customer credit note / refund invoice (Odoo move_type
+    'out_refund') — e.g. to deduct a local withholding tax from a franchise
+    royalty invoice. Draft only — NOT posted/validated; a human confirms it
+    in Odoo.
+
+    invoice_date: 'YYYY-MM-DD'
+    amount: the credit note's line amount (positive number — Odoo treats an
+        out_refund's amount as a reduction on its own).
+    account_id / branch_analytic_account_id / department_analytic_account_id:
+        same optional tagging as create_draft_customer_invoice.
+    """
+    line_values = {"name": description, "quantity": 1, "price_unit": amount}
+    if account_id:
+        line_values["account_id"] = account_id
+    analytic_distribution = {}
+    if branch_analytic_account_id:
+        analytic_distribution[str(branch_analytic_account_id)] = 100.0
+    if department_analytic_account_id:
+        analytic_distribution[str(department_analytic_account_id)] = 100.0
+    if analytic_distribution:
+        line_values["analytic_distribution"] = analytic_distribution
+    move_id = odoo.create(
+        "account.move",
+        {
+            "move_type": "out_refund",
+            "partner_id": customer_id,
+            "invoice_date": invoice_date,
+            "ref": ref,
+            "invoice_line_ids": [(0, 0, line_values)],
+        },
+    )
+    return {"created_move_id": move_id, "state": "draft", "note": "Not posted. Review in Odoo."}
+
+
+@mcp.tool()
 def create_draft_vendor_bill_v2(
     vendor_id: int,
     invoice_date: str,

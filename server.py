@@ -201,6 +201,113 @@ def reconcile_move_lines(line_ids: list) -> dict:
 
 
 @mcp.tool()
+def list_partial_reconciles(
+    created_from: str = "",
+    created_to: str = "",
+    created_by_user_id: int = 0,
+    id_from: int = 0,
+    id_to: int = 0,
+    limit: int = 500,
+) -> list:
+    """
+    READ-ONLY. List reconciliation matches (account.partial.reconcile) so a wrong
+    batch of matches can be found before undoing it. Each row shows when/who
+    created it, the amount, the payment/debit line and the bill/credit line it
+    links, the PARTNER on each side, and `cross_partner` = true when the two sides
+    belong to different partners (a strong sign of a wrong match).
+
+    created_from / created_to: 'YYYY-MM-DD HH:MM:SS' as stored by Odoo (UTC).
+    created_by_user_id: res.users id (0 = anyone).
+    id_from / id_to: optional bounds on the match id (0 = no bound).
+    """
+    domain = []
+    if created_from:
+        domain.append(("create_date", ">=", created_from))
+    if created_to:
+        domain.append(("create_date", "<=", created_to))
+    if created_by_user_id:
+        domain.append(("create_uid", "=", created_by_user_id))
+    if id_from:
+        domain.append(("id", ">=", id_from))
+    if id_to:
+        domain.append(("id", "<=", id_to))
+    partials = odoo.search_read(
+        "account.partial.reconcile", domain,
+        ["id", "create_date", "create_uid", "amount", "debit_move_id", "credit_move_id", "full_reconcile_id"],
+        limit=limit, order="id asc",
+    )
+    line_ids = set()
+    for p in partials:
+        for k in ("debit_move_id", "credit_move_id"):
+            if p.get(k):
+                line_ids.add(p[k][0])
+    partner_of = {}
+    if line_ids:
+        lines = odoo.search_read(
+            "account.move.line", [("id", "in", sorted(line_ids))], ["partner_id"], limit=len(line_ids)
+        )
+        partner_of = {l["id"]: (l["partner_id"][1] if l.get("partner_id") else None) for l in lines}
+    for p in partials:
+        dp = partner_of.get(p["debit_move_id"][0]) if p.get("debit_move_id") else None
+        cp = partner_of.get(p["credit_move_id"][0]) if p.get("credit_move_id") else None
+        p["debit_partner"], p["credit_partner"] = dp, cp
+        p["cross_partner"] = bool(dp and cp and dp != cp)
+    return partials
+
+
+@mcp.tool()
+def unreconcile_partials(partial_ids: list, dry_run: bool = True, confirm_count: int = 0) -> dict:
+    """
+    Undo reconciliation matches by id (account.partial.reconcile) using Odoo's own
+    unlink, the same as the "Unreconcile" button. This moves NO money and deletes
+    NO payment, bill or journal entry — it only removes the match between them, and
+    Odoo then recomputes the paid/not-paid state of the affected bills and payments.
+    A removed match can be recreated later with reconcile_move_lines.
+
+    Two-step safety:
+      1) Call with dry_run=True (default) to see exactly what would be removed
+         (count, total amount, how many belong to a full reconciliation, ids not found).
+      2) Call again with dry_run=False AND confirm_count = the count from step 1.
+    Max 500 ids per call. Only pass the exact ids you verified with
+    list_partial_reconciles — never a guessed id range, because ids can have gaps and
+    neighbouring ids may belong to other users (e.g. POS sessions).
+    """
+    if not partial_ids:
+        return {"error": "partial_ids is empty."}
+    if len(partial_ids) > 500:
+        return {"error": "Max 500 ids per call. Split into batches."}
+    partial_ids = sorted({int(i) for i in partial_ids})
+    found = odoo.search_read(
+        "account.partial.reconcile", [("id", "in", partial_ids)],
+        ["id", "amount", "full_reconcile_id", "create_uid", "create_date"], limit=len(partial_ids),
+    )
+    found_ids = sorted(p["id"] for p in found)
+    missing = [i for i in partial_ids if i not in set(found_ids)]
+    creators = sorted({(p["create_uid"][1] if p.get("create_uid") else "?") for p in found})
+    dates = sorted({p["create_date"] for p in found})
+    summary = {
+        "matches_found": len(found_ids),
+        "total_amount": round(sum(p["amount"] for p in found), 3),
+        "in_full_reconciliation": sum(1 for p in found if p.get("full_reconcile_id")),
+        "created_by": creators,
+        "create_dates": dates[:3] + (["..."] if len(dates) > 3 else []),
+        "ids_not_found": missing,
+    }
+    if dry_run:
+        return {"dry_run": True, **summary,
+                "next_step": f"Re-run with dry_run=False and confirm_count={len(found_ids)} to execute."}
+    if confirm_count != len(found_ids):
+        return {"error": f"confirm_count ({confirm_count}) must equal matches_found ({len(found_ids)}). Nothing was removed.",
+                **summary}
+    odoo.unlink_partial_reconciles(found_ids)
+    still = odoo.search_read(
+        "account.partial.reconcile", [("id", "in", found_ids)], ["id"], limit=len(found_ids)
+    )
+    return {"dry_run": False, "removed": len(found_ids) - len(still),
+            "still_present": [p["id"] for p in still], **summary}
+
+
+@mcp.tool()
 def list_draft_payments(journal_id: int = 0, date_from: str = "", date_to: str = "", limit: int = 100) -> list:
     """
     List DRAFT (not yet posted) vendor/customer payments. Useful for finding

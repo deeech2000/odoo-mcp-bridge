@@ -11,6 +11,8 @@ Safety principle used throughout this whole project:
   - The one exception is `reconcile()`, used only on already-posted lines
     to match existing debits/credits — it moves no money, it only updates
     matching status.
+  - `unlink_partial_reconciles()` only removes reconciliation matches (undo a
+    wrong match). It never deletes payments, bills or journal entries.
   - `write_draft_only()` lets us edit a record's fields, but only after
     checking its state is still 'draft' — it refuses otherwise.
 """
@@ -56,6 +58,15 @@ class OdooClient:
     def reconcile(self, line_ids: list) -> Any:
         """Reconcile a set of account.move.line ids against each other (full or partial)."""
         return self.execute_kw("account.move.line", "reconcile", [line_ids])
+
+    def unlink_partial_reconciles(self, partial_ids: list) -> bool:
+        """
+        Remove reconciliation matches (account.partial.reconcile) through Odoo's
+        own ORM unlink, the same thing the "Unreconcile" button does. Odoo also
+        removes the parent full reconciliation and recomputes the payment state of
+        the affected bills/payments. This is the ONLY model this client ever unlinks.
+        """
+        return self.execute_kw("account.partial.reconcile", "unlink", [partial_ids])
 
     # ---- generic read helpers ----------------------------------------
 

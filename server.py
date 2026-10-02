@@ -623,7 +623,54 @@ def create_draft_customer_credit_note(
     )
     return {"created_move_id": move_id, "state": "draft", "note": "Not posted. Review in Odoo."}
 
+@mcp.tool()
+def create_draft_vendor_bill_multiline(
+    vendor_id: int,
+    invoice_date: str,
+    ref: str,
+    lines: list,
+) -> dict:
+    """
+    Create a DRAFT vendor bill with MULTIPLE lines in one go — e.g. one
+    car rent invoice distributed across branches by sales percentage, each
+    branch on its own line with its own analytic tag. Draft only — NOT
+    posted/validated; a human confirms it in Odoo.
 
+    invoice_date: 'YYYY-MM-DD', applies to the whole invoice.
+    ref: reference for the whole invoice (e.g. "CAR Rent Sep 2026").
+    lines: list of dicts, one per line, each with:
+        - description (str, required)
+        - amount (number, required) — price_unit (qty is always 1)
+        - account_id (int, optional) — GL expense account
+        - branch_analytic_account_id (int, optional)
+        - department_analytic_account_id (int, optional)
+    """
+    invoice_line_ids = []
+    for line in lines:
+        line_values = {"name": line["description"], "quantity": 1, "price_unit": line["amount"]}
+        if line.get("account_id"):
+            line_values["account_id"] = line["account_id"]
+        analytic_distribution = {}
+        if line.get("branch_analytic_account_id"):
+            analytic_distribution[str(line["branch_analytic_account_id"])] = 100.0
+        if line.get("department_analytic_account_id"):
+            analytic_distribution[str(line["department_analytic_account_id"])] = 100.0
+        if analytic_distribution:
+            line_values["analytic_distribution"] = analytic_distribution
+        invoice_line_ids.append((0, 0, line_values))
+    move_id = odoo.create(
+        "account.move",
+        {
+            "move_type": "in_invoice",
+            "partner_id": vendor_id,
+            "invoice_date": invoice_date,
+            "ref": ref,
+            "invoice_line_ids": invoice_line_ids,
+        },
+    )
+    return {"created_move_id": move_id, "state": "draft", "line_count": len(invoice_line_ids),
+            "note": "Not posted. Review in Odoo."}
+    
 @mcp.tool()
 def create_draft_vendor_bill_v2(
     vendor_id: int,

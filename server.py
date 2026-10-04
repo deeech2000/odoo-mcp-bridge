@@ -377,6 +377,246 @@ def list_bank_journals() -> list:
     )
 
 
+@mcp.tool()
+def validate_bank_statement_lines(
+    journal_id: int,
+    date_from: str = "",
+    date_to: str = "",
+    dry_run: bool = True,
+) -> dict:
+    """
+    Auto-match and reconcile unmatched bank statement lines with their Odoo
+    payments, by reading the PBNK/BNK reference embedded in each line's
+    Label field. This is the 'validate' step after importing a bank
+    statement into Odoo.
+
+    Works on all statement lines in the given journal that are NOT yet
+    reconciled (is_reconciled = False) and whose Label contains a payment
+    reference (e.g. 'PBNK15/2026/00001' or 'BNK1/2026/00918').
+
+    Two-step safety (same pattern as unreconcile_partials):
+      dry_run=True  (default): shows what WOULD be matched — line id, date,
+                               amount, label and the payment found — without
+                               changing anything in Odoo.
+      dry_run=False: actually reconciles each matched pair. Only call this
+                     after reviewing the dry-run output and confirming it
+                     looks correct.
+
+    journal_id: bank journal id (see list_bank_journals()).
+    date_from / date_to: optional 'YYYY-MM-DD' bounds on statement line date.
+    """
+    import re
+    domain = [("journal_id", "=", journal_id), ("is_reconciled", "=", False)]
+    if date_from:
+        domain.append(("date", ">=", date_from))
+    if date_to:
+        domain.append(("date", "<=", date_to))
+    stmt_lines = odoo.search_read(
+        "account.bank.statement.line", domain,
+        ["id", "date", "payment_ref", "amount", "move_id", "is_reconciled"],
+        limit=500, order="date asc",
+    )
+    PAY_RE = re.compile(r'((?:PBNK|BNK)\d*\/\d{4}\/\d{5,})', re.IGNORECASE)
+    results = {"matched": [], "no_payment_ref": [], "payment_not_found": [],
+               "already_reconciled": [], "error": []}
+    for sl in stmt_lines:
+        label = sl.get("payment_ref") or ""
+        m = PAY_RE.search(label)
+        if not m:
+            results["no_payment_ref"].append(
+                {"line_id": sl["id"], "date": sl["date"], "amount": sl["amount"], "label": label})
+            continue
+        pay_ref = m.group(1).upper()
+        pays = odoo.search_read(
+            "account.payment", [("name", "=", pay_ref)],
+            ["id", "name", "move_id", "state"], limit=1,
+        )
+        if not pays:
+            results["payment_not_found"].append(
+                {"line_id": sl["id"], "date": sl["date"], "amount": sl["amount"],
+                 "label": label, "ref_searched": pay_ref})
+            continue
+        pay = pays[0]
+        results["matched"].append({
+            "line_id": sl["id"], "date": sl["date"], "amount": sl["amount"],
+            "label": label, "payment": pay["name"], "payment_id": pay["id"],
+        })
+        if not dry_run:
+            try:
+                pay_move_lines = odoo.search_read(
+                    "account.move.line",
+                    [("move_id", "=", pay["move_id"][0]),
+                     ("account_id.account_type", "in",
+                      ["asset_current", "liability_current",
+                       "asset_receivable", "liability_payable"])],
+                    ["id", "reconciled", "amount_residual"], limit=10,
+                )
+                pay_open = [l["id"] for l in pay_move_lines
+                            if not l["reconciled"] and abs(l["amount_residual"]) > 0.0001]
+                stmt_move_lines = odoo.search_read(
+                    "account.move.line",
+                    [("move_id", "=", sl["move_id"][0]),
+                     ("account_id.account_type", "in",
+                      ["asset_current", "liability_current",
+                       "asset_receivable", "liability_payable"])],
+                    ["id", "reconciled", "amount_residual"], limit=10,
+                )
+                stmt_open = [l["id"] for l in stmt_move_lines
+                             if not l["reconciled"] and abs(l["amount_residual"]) > 0.0001]
+                line_ids = pay_open + stmt_open
+                if line_ids:
+                    odoo.reconcile(line_ids)
+                    results["matched"][-1]["status"] = "reconciled"
+                else:
+                    results["matched"][-1]["status"] = "no_open_lines"
+            except Exception as e:
+                results["matched"][-1]["status"] = f"error: {e}"
+                results["error"].append({"line_id": sl["id"], "error": str(e)})
+
+    summary = {
+        "journal_id": journal_id,
+        "dry_run": dry_run,
+        "total_unreconciled": len(stmt_lines),
+        "matched_count": len(results["matched"]),
+        "no_payment_ref_count": len(results["no_payment_ref"]),
+        "payment_not_found_count": len(results["payment_not_found"]),
+        "error_count": len(results["error"]),
+    }
+    if dry_run:
+        summary["next_step"] = (
+            f"Re-run with dry_run=False to reconcile the {len(results['matched'])} matched lines."
+        )
+    return {**summary, **results}
+
+
+@mcp.tool()
+def create_bank_statement_lines(
+    journal_id: int,
+    lines: list,
+) -> dict:
+    """
+    Upload bank statement lines (حركات كشف البنك) to Odoo as
+    account.bank.statement.line records on the given bank journal. Each
+    line lands in the journal's "to reconcile" queue — it is NOT yet linked
+    to any payment. Use link_statement_line_to_payment afterwards to match
+    each line to its Odoo payment.
+
+    journal_id: the bank/cash journal id (see list_bank_journals()).
+    lines: list of dicts, one per bank transaction row, each with:
+        - date   (str, 'YYYY-MM-DD' or 'DD/MM/YYYY', required)
+        - label  (str, required) — the "Label" / Description column
+        - amount (float, required) — positive = credit/deposit,
+                                     negative = debit/withdrawal
+    Returns the created statement line ids.
+    """
+    import re
+    from datetime import datetime
+    created = []
+    for line in lines:
+        raw_date = str(line["date"]).strip()
+        if re.match(r'^\d{2}/\d{2}/\d{4}$', raw_date):
+            raw_date = datetime.strptime(raw_date, '%d/%m/%Y').strftime('%Y-%m-%d')
+        sl_id = odoo.create(
+            "account.bank.statement.line",
+            {
+                "journal_id": journal_id,
+                "date": raw_date,
+                "payment_ref": str(line.get("label", "")),
+                "amount": float(line["amount"]),
+            },
+        )
+        created.append({"line_id": sl_id, "date": raw_date,
+                         "label": line.get("label", ""), "amount": line["amount"]})
+    return {"created_count": len(created), "lines": created,
+            "note": "Lines created in Odoo bank statement queue. Use link_statement_line_to_payment to match each one."}
+
+
+@mcp.tool()
+def link_statement_line_to_payment(
+    statement_line_id: int,
+    payment_name: str,
+) -> dict:
+    """
+    Match (reconcile) a bank statement line to an existing Odoo payment —
+    e.g. link the bank's debit row to PBNK15/2026/00001. This is the step
+    that moves the line from 'Uncleared' to 'Cleared' in Odoo's bank
+    reconciliation view: the payment's journal line (Uncleared/suspense
+    account) is replaced by the actual bank GL account entry from the
+    statement line.
+
+    statement_line_id: the id returned by create_bank_statement_lines.
+    payment_name: the Odoo payment reference, e.g. 'PBNK15/2026/00001'.
+        The tool looks up the payment, finds its open journal line on the
+        suspense/bank account, then reconciles it with the statement line's
+        counterpart move line.
+
+    Returns is_reconciled_now=True when the link succeeded.
+    """
+    pay_moves = odoo.search_read(
+        "account.payment",
+        [("name", "=", payment_name)],
+        ["id", "name", "move_id", "state", "amount", "partner_id", "payment_type"],
+        limit=1,
+    )
+    if not pay_moves:
+        return {"error": f"Payment '{payment_name}' not found in Odoo."}
+    pay = pay_moves[0]
+    move_id = pay["move_id"][0]
+    pay_lines = odoo.search_read(
+        "account.move.line",
+        [("move_id", "=", move_id),
+         ("account_id.account_type", "in",
+          ["asset_receivable", "liability_payable", "asset_current", "liability_current"])],
+        ["id", "account_id", "debit", "credit", "amount_residual", "reconciled"],
+        limit=10,
+    )
+    pay_lines_open = [l for l in pay_lines if not l["reconciled"] and abs(l["amount_residual"]) > 0.0001]
+
+    stmt_lines = odoo.search_read(
+        "account.bank.statement.line",
+        [("id", "=", statement_line_id)],
+        ["id", "move_id", "amount", "payment_ref", "is_reconciled"],
+        limit=1,
+    )
+    if not stmt_lines:
+        return {"error": f"Statement line {statement_line_id} not found."}
+    stmt = stmt_lines[0]
+    if stmt["is_reconciled"]:
+        return {"error": f"Statement line {statement_line_id} is already reconciled.", "line": stmt}
+
+    stmt_move_id = stmt["move_id"][0]
+    stmt_move_lines = odoo.search_read(
+        "account.move.line",
+        [("move_id", "=", stmt_move_id),
+         ("account_id.account_type", "in",
+          ["asset_current", "liability_current", "asset_receivable", "liability_payable"])],
+        ["id", "account_id", "debit", "credit", "amount_residual", "reconciled"],
+        limit=10,
+    )
+    stmt_open = [l for l in stmt_move_lines if not l["reconciled"] and abs(l["amount_residual"]) > 0.0001]
+
+    line_ids = [l["id"] for l in pay_lines_open] + [l["id"] for l in stmt_open]
+    if not line_ids:
+        return {"error": "No open lines found to reconcile.",
+                "payment_lines": pay_lines, "stmt_lines": stmt_move_lines}
+
+    result = odoo.reconcile(line_ids)
+    verify = odoo.search_read(
+        "account.bank.statement.line",
+        [("id", "=", statement_line_id)],
+        ["id", "is_reconciled", "amount_residual"],
+        limit=1,
+    )
+    return {
+        "statement_line_id": statement_line_id,
+        "payment": payment_name,
+        "reconciled_line_ids": line_ids,
+        "result": result,
+        "is_reconciled_now": verify[0]["is_reconciled"] if verify else None,
+        "note": "Statement line linked to payment. Check Odoo bank reconciliation view.",
+    }
+
+
 # ------------------------------------------------------------------
 # WRITE TOOLS — DRAFT ONLY. Nothing here posts or confirms anything.
 # ------------------------------------------------------------------

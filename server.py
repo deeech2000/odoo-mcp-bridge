@@ -487,6 +487,8 @@ def create_draft_customer_invoice(
     account_id: int = 0,
     branch_analytic_account_id: int = 0,
     department_analytic_account_id: int = 0,
+    journal_id: int = 0,
+    currency_id: int = 0,
 ) -> dict:
     """
     Create a DRAFT customer invoice (e.g. franchise royalty billed to a
@@ -496,12 +498,13 @@ def create_draft_customer_invoice(
 
     invoice_date: 'YYYY-MM-DD'
     amount: total amount of the single invoice line (before tax)
-    account_id: optional — the GL revenue account for this line (e.g. a
-        royalty income account). Leave as 0 to let Odoo use the default.
+    account_id: optional — the GL revenue account for this line.
     branch_analytic_account_id / department_analytic_account_id: optional
-        analytic tags (see list_branches() / list_departments()) — for
-        franchise royalties this is often a department like "Franchise"
-        rather than a branch.
+        analytic tags (see list_branches() / list_departments()).
+    journal_id: optional — the journal to post to (e.g. "CAF X Cherry"
+        journal id). Leave as 0 to use the default Customer Invoices journal.
+    currency_id: optional — the invoice currency (e.g. USD=2, OMR=4,
+        BHD=17, AED=21). Leave as 0 to use the company's default (KWD).
     """
     line_values = {"name": description, "quantity": 1, "price_unit": amount}
     if account_id:
@@ -513,16 +516,18 @@ def create_draft_customer_invoice(
         analytic_distribution[str(department_analytic_account_id)] = 100.0
     if analytic_distribution:
         line_values["analytic_distribution"] = analytic_distribution
-    move_id = odoo.create(
-        "account.move",
-        {
-            "move_type": "out_invoice",
-            "partner_id": customer_id,
-            "invoice_date": invoice_date,
-            "ref": ref,
-            "invoice_line_ids": [(0, 0, line_values)],
-        },
-    )
+    move_vals = {
+        "move_type": "out_invoice",
+        "partner_id": customer_id,
+        "invoice_date": invoice_date,
+        "ref": ref,
+        "invoice_line_ids": [(0, 0, line_values)],
+    }
+    if journal_id:
+        move_vals["journal_id"] = journal_id
+    if currency_id:
+        move_vals["currency_id"] = currency_id
+    move_id = odoo.create("account.move", move_vals)
     return {"created_move_id": move_id, "state": "draft", "note": "Not posted. Review in Odoo."}
 
 
@@ -532,6 +537,8 @@ def create_draft_customer_invoice_multiline(
     invoice_date: str,
     ref: str,
     lines: list,
+    journal_id: int = 0,
+    currency_id: int = 0,
 ) -> dict:
     """
     Create a DRAFT customer invoice with MULTIPLE lines in one go — e.g. one
@@ -549,6 +556,10 @@ def create_draft_customer_invoice_multiline(
         - department_analytic_account_id (int, optional)
       e.g. [{"description": "CAF Cafe SA", "amount": 5960.35,
              "branch_analytic_account_id": 158}, ...]
+    journal_id: optional — the journal to post to (e.g. "CAF X Cherry" journal
+        id). Leave as 0 to use the default Customer Invoices journal.
+    currency_id: optional — the invoice currency (e.g. USD=2, OMR=4, BHD=17,
+        AED=21). Leave as 0 to use the company's default (KWD).
     """
     invoice_line_ids = []
     for line in lines:
@@ -563,18 +574,19 @@ def create_draft_customer_invoice_multiline(
         if analytic_distribution:
             line_values["analytic_distribution"] = analytic_distribution
         invoice_line_ids.append((0, 0, line_values))
-
-    move_id = odoo.create(
-        "account.move",
-        {
-            "move_type": "out_invoice",
-            "partner_id": customer_id,
-            "invoice_date": invoice_date,
-            "ref": ref,
-            "invoice_line_ids": invoice_line_ids,
-        },
-    )
-    return {"created_move_id": move_id, "state": "draft", "line_count": len(lines),
+    move_vals = {
+        "move_type": "out_invoice",
+        "partner_id": customer_id,
+        "invoice_date": invoice_date,
+        "ref": ref,
+        "invoice_line_ids": invoice_line_ids,
+    }
+    if journal_id:
+        move_vals["journal_id"] = journal_id
+    if currency_id:
+        move_vals["currency_id"] = currency_id
+    move_id = odoo.create("account.move", move_vals)
+    return {"created_move_id": move_id, "state": "draft", "line_count": len(invoice_line_ids),
             "note": "Not posted. Review in Odoo."}
 
 
@@ -623,6 +635,7 @@ def create_draft_customer_credit_note(
     )
     return {"created_move_id": move_id, "state": "draft", "note": "Not posted. Review in Odoo."}
 
+
 @mcp.tool()
 def create_draft_vendor_bill_multiline(
     vendor_id: int,
@@ -670,7 +683,8 @@ def create_draft_vendor_bill_multiline(
     )
     return {"created_move_id": move_id, "state": "draft", "line_count": len(invoice_line_ids),
             "note": "Not posted. Review in Odoo."}
-    
+
+
 @mcp.tool()
 def create_draft_vendor_bill_v2(
     vendor_id: int,

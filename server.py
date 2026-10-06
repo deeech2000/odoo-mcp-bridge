@@ -877,6 +877,77 @@ def create_draft_customer_credit_note(
 
 
 @mcp.tool()
+def add_lines_to_draft_bill(
+    move_id: int,
+    lines: list,
+    clear_existing_lines: bool = False,
+) -> dict:
+    """
+    Add invoice lines to an existing DRAFT vendor bill. Refuses if the bill
+    is not in draft state. Useful for distributing a marketing/service cost
+    across branches by adding one line per branch with its analytic tag.
+
+    move_id: the account.move id of the draft bill.
+    lines: list of dicts, each with:
+        - description (str, required)
+        - amount (float, required) — price_unit (qty always 1)
+        - account_id (int, optional) — GL expense account
+        - branch_analytic_account_id (int, optional)
+        - department_analytic_account_id (int, optional)
+    clear_existing_lines: if True, removes all existing invoice lines first
+        before adding the new ones. Default False (appends to existing lines).
+        Use True when you want to replace a single summary line with the
+        per-branch breakdown.
+    """
+    bills = odoo.search_read(
+        "account.move", [("id", "=", move_id)], ["state", "name", "partner_id"], limit=1
+    )
+    if not bills:
+        return {"error": f"Bill {move_id} not found."}
+    if bills[0]["state"] != "draft":
+        return {"error": f"Bill {move_id} is in state '{bills[0]['state']}', not draft. Refusing to modify."}
+
+    if clear_existing_lines:
+        existing = odoo.search_read(
+            "account.move.line", [("move_id", "=", move_id), ("display_type", "=", "product")],
+            ["id"], limit=200
+        )
+        if existing:
+            odoo.execute_kw("account.move", "write", [[move_id], {
+                "invoice_line_ids": [(2, l["id"]) for l in existing]
+            }])
+
+    new_lines = []
+    for line in lines:
+        lv = {"name": line["description"], "quantity": 1, "price_unit": line["amount"]}
+        if line.get("account_id"):
+            lv["account_id"] = line["account_id"]
+        dist = {}
+        if line.get("branch_analytic_account_id"):
+            dist[str(line["branch_analytic_account_id"])] = 100.0
+        if line.get("department_analytic_account_id"):
+            dist[str(line["department_analytic_account_id"])] = 100.0
+        if dist:
+            lv["analytic_distribution"] = dist
+        new_lines.append((0, 0, lv))
+
+    odoo.execute_kw("account.move", "write", [[move_id], {"invoice_line_ids": new_lines}])
+
+    updated = odoo.search_read(
+        "account.move", [("id", "=", move_id)], ["name", "amount_total", "state"], limit=1
+    )
+    return {
+        "move_id": move_id,
+        "bill_name": bills[0]["name"],
+        "lines_added": len(lines),
+        "cleared_existing": clear_existing_lines,
+        "new_total": updated[0]["amount_total"] if updated else None,
+        "state": "draft",
+        "note": "Lines added. Bill remains draft — review and post in Odoo.",
+    }
+
+
+@mcp.tool()
 def create_draft_vendor_bill_multiline(
     vendor_id: int,
     invoice_date: str,

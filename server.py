@@ -367,6 +367,72 @@ def update_draft_payment(
 
 
 @mcp.tool()
+def get_odoo_report_pdf(
+    report_name: str,
+    record_ids: list,
+) -> dict:
+    """
+    Download one or more Odoo records as a merged PDF using Odoo's own
+    report engine (same layout as Print button in Odoo UI).
+
+    report_name: the technical report name, e.g.:
+        'account.report_payment_receipt'   — payment receipt/voucher
+        'account.report_invoice'           — vendor bill / customer invoice
+        'account.report_invoice_with_payments' — invoice with payment info
+    record_ids: list of account.move or account.payment ids to include.
+        If multiple ids are given, Odoo merges them into one PDF.
+
+    Returns a base64-encoded PDF string under key 'pdf_b64', plus the
+    content-type. The caller should write it to a .pdf file.
+    """
+    import base64, urllib.request, urllib.parse
+
+    odoo_url = odoo.url
+    db = odoo.db
+    uid = odoo.uid
+    api_key = odoo.api_key
+
+    ids_str = ','.join(str(i) for i in record_ids)
+    url = (f"{odoo_url}/report/pdf/{report_name}/{ids_str}"
+           f"?session_id=&db={db}")
+
+    # Use session-less auth via API key through the JSON-RPC session endpoint
+    # First get a session via the web/session/authenticate endpoint
+    import json as _json
+    auth_url = f"{odoo_url}/web/session/authenticate"
+    auth_payload = _json.dumps({
+        "jsonrpc": "2.0", "method": "call", "id": 1,
+        "params": {"db": db, "login": odoo.username, "password": api_key}
+    }).encode()
+    req = urllib.request.Request(auth_url, data=auth_payload,
+                                  headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        auth_data = _json.loads(resp.read())
+    session_id = auth_data.get("result", {}).get("session_id") or ""
+    if not session_id:
+        cookies = resp.headers.get("Set-Cookie", "")
+        import re
+        m = re.search(r'session_id=([^;,\s]+)', cookies)
+        session_id = m.group(1) if m else ""
+
+    pdf_url = f"{odoo_url}/report/pdf/{report_name}/{ids_str}"
+    pdf_req = urllib.request.Request(pdf_url, headers={
+        "Cookie": f"session_id={session_id}",
+        "Accept": "application/pdf",
+    })
+    with urllib.request.urlopen(pdf_req, timeout=60) as pdf_resp:
+        pdf_bytes = pdf_resp.read()
+
+    return {
+        "pdf_b64": base64.b64encode(pdf_bytes).decode(),
+        "size_bytes": len(pdf_bytes),
+        "report": report_name,
+        "record_ids": record_ids,
+        "note": "Decode pdf_b64 from base64 and save as .pdf",
+    }
+
+
+@mcp.tool()
 def list_bank_journals() -> list:
     """List bank/cash journals available to pay from (needed for creating a draft payment)."""
     return odoo.search_read(

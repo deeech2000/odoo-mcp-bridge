@@ -1147,6 +1147,103 @@ def create_draft_vendor_payment(
     return {"created_payment_id": payment_id, "state": "draft", "note": "Not posted. Review in Odoo."}
 
 
+@mcp.tool()
+def get_partner_ledger_pdf(
+    partner_ids: list,
+    date_from: str = "",
+    date_to: str = "",
+) -> dict:
+    """
+    Download the Partner Ledger (كشف حساب شريك) as a PDF from Odoo,
+    exactly like pressing the PDF button on the Partner Ledger report page.
+
+    partner_ids: list of res.partner ids to include in the report.
+    date_from: optional start date 'YYYY-MM-DD' (leave empty for all time).
+    date_to:   optional end date   'YYYY-MM-DD' (leave empty for today).
+
+    Returns a base64-encoded PDF string under key 'pdf_b64'.
+    Decode it from base64 and save as a .pdf file to present to the user.
+    """
+    import base64, json as _json, urllib.request, urllib.parse, re
+
+    odoo_url = odoo.url
+    db       = odoo.db
+    api_key  = odoo.api_key
+
+    # 1. Authenticate and get a session cookie
+    auth_payload = _json.dumps({
+        "jsonrpc": "2.0", "method": "call", "id": 1,
+        "params": {"db": db, "login": odoo.username, "password": api_key}
+    }).encode()
+    req = urllib.request.Request(
+        f"{odoo_url}/web/session/authenticate",
+        data=auth_payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw_cookie = resp.headers.get("Set-Cookie", "")
+    m = re.search(r'session_id=([^;,\s]+)', raw_cookie)
+    if not m:
+        return {"error": "Authentication failed – could not get session_id"}
+    session_id = m.group(1)
+
+    # 2. Build the wizard options payload
+    options = {
+        "partner_ids": partner_ids,
+        "account_type": ["trade"],
+        "unfold_all": True,
+        "date": {
+            "date_from": date_from or False,
+            "date_to":   date_to   or False,
+            "mode": "range" if date_from else "single",
+            "filter": "custom" if date_from else "this_year",
+        },
+    }
+
+    # 3. Call /account/partner_ledger endpoint to get the PDF
+    report_payload = _json.dumps({
+        "jsonrpc": "2.0", "method": "call", "id": 2,
+        "params": {"options": options, "output_format": "pdf", "financial_id": False}
+    }).encode()
+
+    pdf_req = urllib.request.Request(
+        f"{odoo_url}/account/partner_ledger",
+        data=report_payload,
+        headers={
+            "Content-Type": "application/json",
+            "Cookie": f"session_id={session_id}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(pdf_req, timeout=60) as pdf_resp:
+            content_type = pdf_resp.headers.get("Content-Type", "")
+            pdf_bytes = pdf_resp.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        return {"error": f"HTTP {e.code}: {body[:500]}"}
+
+    # If Odoo returned JSON with a file key instead of raw PDF bytes
+    if "application/json" in content_type:
+        try:
+            data = _json.loads(pdf_bytes)
+            file_b64 = (data.get("result") or {}).get("file_content") or ""
+            if file_b64:
+                return {
+                    "pdf_b64": file_b64,
+                    "size_bytes": len(base64.b64decode(file_b64)),
+                    "note": "Decode pdf_b64 from base64 and save as .pdf",
+                }
+        except Exception:
+            pass
+        return {"error": "Unexpected JSON response", "body": pdf_bytes.decode(errors="replace")[:500]}
+
+    return {
+        "pdf_b64": base64.b64encode(pdf_bytes).decode(),
+        "size_bytes": len(pdf_bytes),
+        "note": "Decode pdf_b64 from base64 and save as .pdf",
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 

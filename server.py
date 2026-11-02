@@ -906,6 +906,8 @@ def create_draft_customer_credit_note(
     account_id: int = 0,
     branch_analytic_account_id: int = 0,
     department_analytic_account_id: int = 0,
+    journal_id: int = 0,
+    currency_id: int = 0,
 ) -> dict:
     """
     Create a DRAFT customer credit note / refund invoice (Odoo move_type
@@ -918,6 +920,10 @@ def create_draft_customer_credit_note(
         out_refund's amount as a reduction on its own).
     account_id / branch_analytic_account_id / department_analytic_account_id:
         same optional tagging as create_draft_customer_invoice.
+    journal_id: optional — the journal to post to (e.g. Customer Invoices USD journal id).
+        Leave as 0 to use the default Customer Invoices journal.
+    currency_id: optional — the invoice currency (e.g. USD=2, OMR=4, BHD=17, AED=21).
+        Leave as 0 to use the company's default (KWD).
     """
     line_values = {"name": description, "quantity": 1, "price_unit": amount}
     if account_id:
@@ -929,16 +935,18 @@ def create_draft_customer_credit_note(
         analytic_distribution[str(department_analytic_account_id)] = 100.0
     if analytic_distribution:
         line_values["analytic_distribution"] = analytic_distribution
-    move_id = odoo.create(
-        "account.move",
-        {
-            "move_type": "out_refund",
-            "partner_id": customer_id,
-            "invoice_date": invoice_date,
-            "ref": ref,
-            "invoice_line_ids": [(0, 0, line_values)],
-        },
-    )
+    move_vals = {
+        "move_type": "out_refund",
+        "partner_id": customer_id,
+        "invoice_date": invoice_date,
+        "ref": ref,
+        "invoice_line_ids": [(0, 0, line_values)],
+    }
+    if journal_id:
+        move_vals["journal_id"] = journal_id
+    if currency_id:
+        move_vals["currency_id"] = currency_id
+    move_id = odoo.create("account.move", move_vals)
     return {"created_move_id": move_id, "state": "draft", "note": "Not posted. Review in Odoo."}
 
 

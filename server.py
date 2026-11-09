@@ -367,6 +367,79 @@ def update_draft_payment(
 
 
 @mcp.tool()
+def reset_and_reschedule_payments(
+    payment_ids: list,
+    new_date: str,
+) -> dict:
+    """
+    Reset one or more posted/in_process payments back to 'draft' state,
+    then update their date to new_date. Useful when payments were recorded
+    but not yet executed at the bank and need to be rescheduled.
+
+    payment_ids: list of account.payment ids to reset and reschedule.
+    new_date: new payment date in 'YYYY-MM-DD' format.
+
+    Returns a summary of which payments succeeded and which failed.
+    Safety: only resets payments that are in 'posted' or 'in_process' state.
+    Does NOT re-post/confirm — payments stay draft for human review in Odoo.
+    """
+    results = []
+    for pid in payment_ids:
+        try:
+            # 1. Read current state
+            recs = odoo.search_read(
+                "account.payment",
+                domain=[["id", "=", pid]],
+                fields=["name", "state", "amount", "partner_id"],
+            )
+            if not recs:
+                results.append({"payment_id": pid, "status": "error", "message": "Payment not found"})
+                continue
+            rec = recs[0]
+            state = rec.get("state", "")
+            name  = rec.get("name", str(pid))
+
+            if state == "draft":
+                # Already draft — just update date
+                odoo.write("account.payment", pid, {"date": new_date})
+                results.append({"payment_id": pid, "name": name, "status": "already_draft_date_updated", "new_date": new_date})
+                continue
+
+            if state not in ("posted", "in_process", "sent"):
+                results.append({"payment_id": pid, "name": name, "status": "skipped",
+                                 "message": f"State '{state}' cannot be reset"})
+                continue
+
+            # 2. Reset to draft via action_draft (button_draft)
+            odoo.execute("account.payment", "action_draft", [pid])
+
+            # 3. Update date
+            odoo.write("account.payment", pid, {"date": new_date})
+
+            results.append({
+                "payment_id": pid,
+                "name": name,
+                "previous_state": state,
+                "status": "reset_to_draft",
+                "new_date": new_date,
+                "note": "Payment is now Draft. Review and re-post in Odoo when ready.",
+            })
+
+        except Exception as e:
+            results.append({"payment_id": pid, "status": "error", "message": str(e)})
+
+    success = [r for r in results if r["status"] in ("reset_to_draft", "already_draft_date_updated")]
+    failed  = [r for r in results if r["status"] not in ("reset_to_draft", "already_draft_date_updated")]
+    return {
+        "total": len(payment_ids),
+        "success_count": len(success),
+        "failed_count": len(failed),
+        "results": results,
+        "note": "All reset payments are now Draft — post them in Odoo when the bank transfer is executed.",
+    }
+
+
+@mcp.tool()
 def get_odoo_report_pdf(
     report_name: str,
     record_ids: list,

@@ -401,7 +401,7 @@ def reset_and_reschedule_payments(
 
             if state == "draft":
                 # Already draft — just update date
-                odoo.write("account.payment", pid, {"date": new_date})
+                odoo.execute_kw("account.payment", "write", [[pid], {"date": new_date}])
                 results.append({"payment_id": pid, "name": name, "status": "already_draft_date_updated", "new_date": new_date})
                 continue
 
@@ -410,11 +410,11 @@ def reset_and_reschedule_payments(
                                  "message": f"State '{state}' cannot be reset"})
                 continue
 
-            # 2. Reset to draft via action_draft (button_draft)
-            odoo.execute("account.payment", "action_draft", [pid])
+            # 2. Reset to draft via action_draft
+            odoo.execute_kw("account.payment", "action_draft", [[pid]])
 
             # 3. Update date
-            odoo.write("account.payment", pid, {"date": new_date})
+            odoo.execute_kw("account.payment", "write", [[pid], {"date": new_date}])
 
             results.append({
                 "payment_id": pid,

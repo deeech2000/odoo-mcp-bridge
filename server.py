@@ -537,6 +537,116 @@ def create_bill_from_po(
 
 
 @mcp.tool()
+def update_draft_bill(
+    move_id: int,
+    invoice_date: str = "",
+    ref: str = "",
+    accounting_date: str = "",
+) -> dict:
+    """
+    Edit the header of a DRAFT vendor bill / customer invoice / credit note:
+    bill date, reference, and/or accounting date. Refuses if the move is not
+    in 'draft' state, so it can never change a posted document. Never posts.
+
+    move_id: account.move id.
+    invoice_date: new bill/invoice date 'YYYY-MM-DD' (leave "" to keep).
+    ref: new reference (leave "" to keep).
+    accounting_date: new accounting (GL) date 'YYYY-MM-DD' (leave "" to keep;
+        Odoo normally sets it equal to the bill date).
+    """
+    values = {}
+    if invoice_date:
+        values["invoice_date"] = invoice_date
+    if ref:
+        values["ref"] = ref
+    if accounting_date:
+        values["date"] = accounting_date
+    if not values:
+        return {"move_id": move_id, "status": "nothing_to_update"}
+    odoo.write_draft_only("account.move", move_id, values)
+    rec = odoo.search_read(
+        "account.move", [["id", "=", move_id]],
+        ["id", "name", "state", "invoice_date", "date", "ref", "amount_total"], limit=1
+    )[0]
+    return {"status": "updated", "move": rec, "note": "Still draft — review and post in Odoo."}
+
+
+@mcp.tool()
+def create_draft_journal_entry(
+    date: str,
+    ref: str,
+    lines: list,
+    journal_id: int = 0,
+) -> dict:
+    """
+    Create a DRAFT manual journal entry (move_type 'entry'), e.g. moving old
+    supplier balances from Accounts Payable to an Accrued account, or any
+    reclass. Draft only — NOT posted; a human posts it in Odoo.
+
+    date: 'YYYY-MM-DD' accounting date.
+    ref: reference / description of the entry.
+    journal_id: optional journal id; leave 0 to use Odoo's default
+        Miscellaneous journal.
+    lines: list of dicts, each with:
+        - account_id (int, required)
+        - debit (number, default 0)
+        - credit (number, default 0)
+        - label (str, optional)
+        - partner_id (int, optional) — REQUIRED on payable/receivable lines
+          so the partner's balance moves
+        - branch_analytic_account_id (int, optional)
+        - department_analytic_account_id (int, optional)
+
+    Safety: refuses if total debit != total credit (to the fils), or if a
+    line has both debit and credit, or neither.
+    """
+    total_debit = round(sum(float(l.get("debit", 0) or 0) for l in lines), 3)
+    total_credit = round(sum(float(l.get("credit", 0) or 0) for l in lines), 3)
+    if abs(total_debit - total_credit) > 0.0005:
+        return {"error": f"Entry is not balanced: debit {total_debit} vs credit {total_credit}. Nothing created."}
+
+    line_ids = []
+    for i, l in enumerate(lines, 1):
+        debit = round(float(l.get("debit", 0) or 0), 3)
+        credit = round(float(l.get("credit", 0) or 0), 3)
+        if (debit and credit) or (not debit and not credit):
+            return {"error": f"Line {i}: set either debit or credit (not both, not neither). Nothing created."}
+        if not l.get("account_id"):
+            return {"error": f"Line {i}: account_id is required. Nothing created."}
+        vals = {
+            "account_id": l["account_id"],
+            "debit": debit,
+            "credit": credit,
+            "name": l.get("label") or ref,
+        }
+        if l.get("partner_id"):
+            vals["partner_id"] = l["partner_id"]
+        analytic = {}
+        if l.get("branch_analytic_account_id"):
+            analytic[str(l["branch_analytic_account_id"])] = 100.0
+        if l.get("department_analytic_account_id"):
+            analytic[str(l["department_analytic_account_id"])] = 100.0
+        if analytic:
+            vals["analytic_distribution"] = analytic
+        line_ids.append((0, 0, vals))
+
+    move_vals = {"move_type": "entry", "date": date, "ref": ref, "line_ids": line_ids}
+    if journal_id:
+        move_vals["journal_id"] = journal_id
+    move_id = odoo.create("account.move", move_vals)
+    rec = odoo.search_read("account.move", [["id", "=", move_id]], ["id", "name", "state", "journal_id"], limit=1)[0]
+    return {
+        "created_move_id": move_id,
+        "journal": rec.get("journal_id"),
+        "state": rec.get("state"),
+        "line_count": len(line_ids),
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "note": "Draft journal entry — review and post in Odoo.",
+    }
+
+
+@mcp.tool()
 def get_odoo_report_pdf(
     report_name: str,
     record_ids: list,

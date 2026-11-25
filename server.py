@@ -440,6 +440,103 @@ def reset_and_reschedule_payments(
 
 
 @mcp.tool()
+def create_bill_from_po(
+    po_names: list,
+    invoice_date: str = "",
+    bill_reference: str = "",
+) -> dict:
+    """
+    Press Odoo's "Create Bill" button on one or more confirmed Purchase Orders.
+    The bill is created by Odoo itself from the PO lines, so it stays LINKED to
+    the PO (the PO moves from 'To Invoice' to 'Fully Billed'), and it keeps the
+    PO's products, accounts and analytic distribution.
+
+    The bill is created as DRAFT only — it is never posted.
+
+    po_names: list of PO numbers, e.g. ["PO/2026/10/19153", "PO/2026/10/19155"]
+    invoice_date: optional 'YYYY-MM-DD' to set on the new draft bill(s).
+    bill_reference: optional vendor bill reference (ref) to set on the new bill(s).
+
+    Safety: only POs in state 'purchase'/'done' with invoice_status 'to invoice'
+    are processed. POs already billed, still RFQ/draft, or cancelled are skipped
+    with a reason, so a bill is never created twice.
+    """
+    results = []
+    for po_name in po_names:
+        try:
+            pos = odoo.search_read(
+                "purchase.order",
+                [["name", "=", po_name]],
+                ["id", "name", "state", "invoice_status", "invoice_ids", "amount_total", "partner_id"],
+                limit=1,
+            )
+            if not pos:
+                results.append({"po": po_name, "status": "error", "message": "PO not found"})
+                continue
+            po = pos[0]
+            if po["state"] not in ("purchase", "done"):
+                results.append({"po": po_name, "status": "skipped",
+                                "message": f"PO state is '{po['state']}' — confirm the PO in Odoo first"})
+                continue
+            if po["invoice_status"] != "to invoice":
+                results.append({"po": po_name, "status": "skipped",
+                                "message": f"invoice_status is '{po['invoice_status']}' — nothing left to bill",
+                                "existing_bill_ids": po["invoice_ids"]})
+                continue
+
+            before = set(po["invoice_ids"])
+            try:
+                odoo.execute_kw("purchase.order", "action_create_invoice", [[po["id"]]])
+            except Exception as e:
+                # Odoo returns a window action that may contain None values;
+                # XML-RPC then raises 'cannot marshal None' even though the
+                # bill WAS created. Anything else is a real error.
+                if "marshal None" not in str(e):
+                    raise
+
+            after = odoo.search_read(
+                "purchase.order", [["id", "=", po["id"]]], ["invoice_ids", "invoice_status"], limit=1
+            )[0]
+            new_ids = [i for i in after["invoice_ids"] if i not in before]
+            if not new_ids:
+                results.append({"po": po_name, "status": "error",
+                                "message": "Odoo did not create a bill — check the PO in Odoo"})
+                continue
+
+            values = {}
+            if invoice_date:
+                values["invoice_date"] = invoice_date
+            if bill_reference:
+                values["ref"] = bill_reference
+            for bid in new_ids:
+                if values:
+                    odoo.write_draft_only("account.move", bid, values)
+
+            bills = odoo.search_read(
+                "account.move", [["id", "in", new_ids]],
+                ["id", "name", "state", "amount_total", "invoice_date", "ref"], limit=len(new_ids)
+            )
+            results.append({
+                "po": po_name,
+                "vendor": po["partner_id"][1] if po["partner_id"] else "",
+                "po_amount": po["amount_total"],
+                "status": "bill_created",
+                "po_invoice_status_now": after["invoice_status"],
+                "bills": bills,
+            })
+        except Exception as e:
+            results.append({"po": po_name, "status": "error", "message": str(e)})
+
+    created = [r for r in results if r["status"] == "bill_created"]
+    return {
+        "total": len(po_names),
+        "created_count": len(created),
+        "results": results,
+        "note": "Bills are DRAFT and linked to their POs. Review and post them in Odoo.",
+    }
+
+
+@mcp.tool()
 def get_odoo_report_pdf(
     report_name: str,
     record_ids: list,
